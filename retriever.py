@@ -1,6 +1,5 @@
 import json
 import os
-from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -38,10 +37,14 @@ print(documents[0][:500])
 # Load model lazily so API startup can bind port quickly on low-memory instances.
 model = None
 
+# Use BM25-only mode by default on Render to avoid OOM on small instances.
+USE_SEMANTIC_SEARCH = os.getenv("USE_SEMANTIC_SEARCH", "0" if os.getenv("RENDER") else "1") == "1"
+
 
 def get_model():
     global model
     if model is None:
+        from sentence_transformers import SentenceTransformer
         model = SentenceTransformer("BAAI/bge-small-en-v1.5")
         print("\nModel loaded successfully")
     return model
@@ -53,6 +56,11 @@ def load_or_build_index():
         print("\nFAISS index loaded")
         print("Total vectors:", loaded_index.ntotal)
         return loaded_index
+
+    # In constrained deploy environments, avoid building embeddings at runtime.
+    if not USE_SEMANTIC_SEARCH:
+        print("\nFAISS index not found. Continuing in BM25-only mode.")
+        return None
 
     local_model = get_model()
     embeddings = local_model.encode(
@@ -155,16 +163,16 @@ def search(query, top_k=5):
 
     # ---------- Semantic Search ----------
 
-    # query_embedding = get_model().encode([query])
-    query_embedding = get_model().encode([expanded_query])
-    query_embedding = np.array(query_embedding).astype("float32")
-
-    distances, indices = index.search(query_embedding, len(data))
-
     semantic_scores = {}
 
-    for rank, idx in enumerate(indices[0]):
-        semantic_scores[idx] = 1 / (1 + distances[0][rank])
+    if USE_SEMANTIC_SEARCH and index is not None:
+        query_embedding = get_model().encode([expanded_query])
+        query_embedding = np.array(query_embedding).astype("float32")
+
+        distances, indices = index.search(query_embedding, len(data))
+
+        for rank, idx in enumerate(indices[0]):
+            semantic_scores[idx] = 1 / (1 + distances[0][rank])
 
     # ---------- BM25 Search ----------
 

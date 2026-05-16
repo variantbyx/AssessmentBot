@@ -42,7 +42,14 @@ vague_queries = [
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    from retriever import search
+    try:
+        from retriever import search
+    except Exception:
+        return {
+            "reply": "Service is warming up. Please try again in a moment.",
+            "recommendations": [],
+            "end_of_conversation": False
+        }
 
     latest_user_message = ""
     previous_user_message = ""
@@ -122,10 +129,17 @@ def chat(request: ChatRequest):
             "end_of_conversation": False
         }
 
-    recommendations = search(
-        latest_user_message,
-        top_k=5
-    )
+    try:
+        recommendations = search(
+            latest_user_message,
+            top_k=5
+        )
+    except Exception:
+        return {
+            "reply": "Service is temporarily busy. Please retry your request.",
+            "recommendations": [],
+            "end_of_conversation": False
+        }
 
     #Response
 
