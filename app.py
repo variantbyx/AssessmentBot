@@ -4,6 +4,10 @@ from typing import List
 
 app = FastAPI()
 
+# making convo history
+
+conversation_store = {}
+
 #Message Schema
 
 class Message(BaseModel):
@@ -12,9 +16,14 @@ class Message(BaseModel):
 
 #Request Schema
 
+# class ChatRequest(BaseModel):
+#     messages: List[Message]
+
+#user conversation has memory.
 class ChatRequest(BaseModel):
+    session_id: str
     messages: List[Message]
-    
+
 #homepage
 
 @app.get("/")
@@ -41,6 +50,22 @@ vague_queries = [
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    session_id = request.session_id
+
+    if session_id not in conversation_store:
+
+        conversation_store[session_id] = {
+            "role_type": None,
+            "seniority": None,
+            "language": None,
+            "industry": None,
+            "skills": [],
+            "shortlist": [],
+            "excluded": []
+        }
+
+    state = conversation_store[session_id]
 
     try:
         from retriever import search
@@ -81,12 +106,74 @@ def chat(request: ChatRequest):
 
     query_lower = latest_user_message.lower()
 
-    is_vague = (
-        len(query_lower.split()) <= 3
-    )
+    # ---------- Detect Seniority ----------
+
+    if "graduate" in query_lower:
+        state["seniority"] = "graduate"
+
+    elif "senior" in query_lower:
+        state["seniority"] = "senior"
+
+    elif "manager" in query_lower:
+        state["seniority"] = "manager"
+
+    # ---------- Detect Industry ----------
+
+    if "healthcare" in query_lower:
+        state["industry"] = "healthcare"
+
+    elif "finance" in query_lower:
+        state["industry"] = "finance"
+
+    elif "sales" in query_lower:
+        state["industry"] = "sales"
+
+    # ---------- Detect Skills ----------
+
+    skills = [
+        "java",
+        "python",
+        "sql",
+        "aws",
+        "docker",
+        "spring",
+        "excel",
+        "word"
+    ]
+
+    for skill in skills:
+
+        if skill in query_lower:
+
+            if skill not in state["skills"]:
+                state["skills"].append(skill)
+
+    # is_vague = (
+    #     len(query_lower.split()) <= 3
+    # )
+
+    #ASK INTELLIGENT FOLLOWUPS
+
+    needs_clarification = False
+    clarification_question = ""
+
+    if state["seniority"] is None:
+
+        needs_clarification = True
+        clarification_question = (
+            "What experience level is the role? "
+            "Graduate, mid-level, or senior?"
+        )
+
+    elif len(state["skills"]) == 0:
+
+        needs_clarification = True
+        clarification_question = (
+            "What are the primary skills required for the role?"
+        )
 
     #Run retrieval
-    
+
     #Comparison Intent
 
     if "compare" in query_lower:
@@ -112,20 +199,23 @@ def chat(request: ChatRequest):
                 f"{', '.join(second['categories'])}."
             )
 
+            # return {
+            #     "reply": comparison_text,
+            #     "recommendations": recommendations,
+            #     "end_of_conversation": False
+            # }
+
             return {
                 "reply": comparison_text,
                 "recommendations": recommendations,
                 "end_of_conversation": False
             }
 
-    if is_vague:
+    if needs_clarification:
 
         return {
-            "reply": (
-                "Could you share more details about the role, "
-                "skills required, and experience level?"
-            ),
-            "recommendations": [],
+            "reply": clarification_question,
+            "recommendations": None,
             "end_of_conversation": False
         }
 
@@ -134,7 +224,9 @@ def chat(request: ChatRequest):
             latest_user_message,
             top_k=5
         )
+
     except Exception:
+
         return {
             "reply": "Service is temporarily busy. Please retry your request.",
             "recommendations": [],
