@@ -46,6 +46,41 @@ vague_queries = [
     "candidate"
 ]
 
+#Explanation Generator
+
+def generate_explanation(recommendations):
+
+    explanations = []
+
+    for item in recommendations[:3]:
+
+        name = item["name"]
+
+        categories = item.get("categories", [])
+        job_levels = item.get("job_levels", [])
+
+        explanation = f"{name} is recommended"
+
+        if len(categories) > 0:
+
+            explanation += (
+                f" because it evaluates "
+                f"{', '.join(categories[:2])}"
+            )
+
+        if len(job_levels) > 0:
+
+            explanation += (
+                f" for "
+                f"{', '.join(job_levels[:2])} roles"
+            )
+
+        explanation += "."
+
+        explanations.append(explanation)
+
+    return " ".join(explanations)
+
 #Chat Endpoint
 
 @app.post("/chat")
@@ -105,6 +140,24 @@ def chat(request: ChatRequest):
         )
 
     query_lower = latest_user_message.lower()
+
+    #refinement intent detection
+
+    remove_intent = (
+        "remove" in query_lower or
+        "drop" in query_lower
+    )
+
+    add_intent = (
+        "add" in query_lower or
+        "include" in query_lower
+    )
+
+    confirm_intent = (
+        "confirmed" in query_lower or
+        "final" in query_lower or
+        "lock" in query_lower
+    )
 
     # ---------- Detect Seniority ----------
 
@@ -172,6 +225,73 @@ def chat(request: ChatRequest):
             "What are the primary skills required for the role?"
         )
 
+    #Handle REMOVE intent
+
+    # ---------- Remove Intent ----------
+
+    if remove_intent:
+
+        updated_shortlist = []
+
+        for item in state["shortlist"]:
+
+            item_name = item["name"].lower()
+
+            should_remove = False
+
+            for word in query_lower.split():
+
+                if word in item_name:
+                    should_remove = True
+
+            if not should_remove:
+                updated_shortlist.append(item)
+
+        state["shortlist"] = updated_shortlist
+
+        return {
+            "reply": "Requested assessments removed from the shortlist.",
+            "recommendations": state["shortlist"],
+            "end_of_conversation": False
+        }
+
+    # ---------- Add Intent ----------
+
+    if add_intent:
+
+        new_results = search(
+            latest_user_message,
+            top_k=3
+        )
+
+        existing_names = set()
+
+        for item in state["shortlist"]:
+            existing_names.add(item["name"])
+
+        for item in new_results:
+
+            if item["name"] not in existing_names:
+                state["shortlist"].append(item)
+
+        return {
+            "reply": "New assessments added to the shortlist.",
+            "recommendations": state["shortlist"],
+            "end_of_conversation": False
+        }
+
+    #Handle CONFIRM intent
+
+    # ---------- Confirm Intent ----------
+
+    if confirm_intent:
+
+        return {
+            "reply": "Final shortlist confirmed.",
+            "recommendations": state["shortlist"],
+            "end_of_conversation": True
+        }
+
     #Run retrieval
 
     #Comparison Intent
@@ -182,6 +302,10 @@ def chat(request: ChatRequest):
             latest_user_message,
             top_k=2
         )
+
+        #Add shortlist persistence after retrieval
+
+        state["shortlist"] = recommendations
 
         if len(recommendations) >= 2:
 
@@ -224,6 +348,8 @@ def chat(request: ChatRequest):
             latest_user_message,
             top_k=5
         )
+
+        state["shortlist"] = recommendations
 
     except Exception:
 
