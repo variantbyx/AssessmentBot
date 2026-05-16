@@ -14,6 +14,14 @@ class Message(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: List[Message]
+    
+#homepage
+
+@app.get("/")
+def home():
+    return {
+        "message": "SHL Assessment Recommendation API Running"
+    }
 
 #Health Endpoint
 
