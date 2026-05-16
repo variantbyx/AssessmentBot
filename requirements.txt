@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+sentence-transformers
+faiss-cpu
+numpy
+rank-bm25
+torch
+transformers
+huggingface-hub
+pydantic
