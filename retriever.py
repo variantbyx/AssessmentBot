@@ -1,4 +1,5 @@
 import json
+import os
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
@@ -34,40 +35,49 @@ print("BM25 index created")
 print("\nExample document:\n")
 print(documents[0][:500])
 
-#Load Embedding Model
+# Load model lazily so API startup can bind port quickly on low-memory instances.
+model = None
 
-model = SentenceTransformer("BAAI/bge-small-en-v1.5")
 
-print("\nModel loaded successfully")
+def get_model():
+    global model
+    if model is None:
+        model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+        print("\nModel loaded successfully")
+    return model
 
-#Generate Embeddings
 
-embeddings = model.encode(
-    documents,
-    show_progress_bar=True
-)
+def load_or_build_index():
+    if os.path.exists("shl_index.faiss"):
+        loaded_index = faiss.read_index("shl_index.faiss")
+        print("\nFAISS index loaded")
+        print("Total vectors:", loaded_index.ntotal)
+        return loaded_index
 
-print("\nEmbeddings shape:", embeddings.shape)
+    local_model = get_model()
+    embeddings = local_model.encode(
+        documents,
+        show_progress_bar=True
+    )
 
-#Create FAISS Index
+    print("\nEmbeddings shape:", embeddings.shape)
 
-embeddings = np.array(embeddings).astype("float32")
+    embeddings = np.array(embeddings).astype("float32")
+    dimension = embeddings.shape[1]
+    loaded_index = faiss.IndexFlatL2(dimension)
+    loaded_index.add(embeddings)
 
-dimension = embeddings.shape[1]
+    faiss.write_index(loaded_index, "shl_index.faiss")
 
-index = faiss.IndexFlatL2(dimension)
+    with open("documents.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-index.add(embeddings)
+    print("\nFAISS index created")
+    print("Total vectors:", loaded_index.ntotal)
+    return loaded_index
 
-#Save embeddings/index so API loads instantly.
 
-faiss.write_index(index, "shl_index.faiss")
-
-with open("documents.json", "w", encoding="utf-8") as f:
-    json.dump(data, f, indent=2)
-
-print("\nFAISS index created")
-print("Total vectors:", index.ntotal)
+index = load_or_build_index()
 
 
 # #Create Query Search Function (old)
@@ -145,8 +155,8 @@ def search(query, top_k=5):
 
     # ---------- Semantic Search ----------
 
-    # query_embedding = model.encode([query])
-    query_embedding = model.encode([expanded_query])
+    # query_embedding = get_model().encode([query])
+    query_embedding = get_model().encode([expanded_query])
     query_embedding = np.array(query_embedding).astype("float32")
 
     distances, indices = index.search(query_embedding, len(data))
@@ -282,19 +292,20 @@ def evaluate_recall_at_10():
 
     print("\nAverage Recall@10:", round(avg_recall, 2))
 
-#Test Queries
-search("Java backend developer")
+if __name__ == "__main__":
+    #Test Queries
+    search("Java backend developer")
 
-search("leadership personality assessment")
+    search("leadership personality assessment")
 
-search("graduate software engineer aptitude")
+    search("graduate software engineer aptitude")
 
-search("sales manager communication skills")
+    search("sales manager communication skills")
 
-search("python coding assessment")
+    search("python coding assessment")
 
-#run eval
-evaluate_recall_at_10()
+    #run eval
+    evaluate_recall_at_10()
 
 # measuring recall@10 value manually 
 

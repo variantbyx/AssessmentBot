@@ -1,7 +1,6 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
-from retriever import search
 
 app = FastAPI()
 
@@ -34,6 +33,8 @@ vague_queries = [
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+
+    from retriever import search
 
     latest_user_message = ""
     previous_user_message = ""
