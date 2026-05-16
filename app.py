@@ -321,6 +321,7 @@ def chat(request: ChatRequest):
                 f"{', '.join(first['categories'])}, whereas "
                 f"the second focuses on "
                 f"{', '.join(second['categories'])}."
+                f" Both assessments are suitable for technical hiring workflows."
             )
 
             # return {
@@ -362,7 +363,7 @@ def chat(request: ChatRequest):
     #Response
 
     return {
-        "reply": "Here are some recommended SHL assessments.",
+        "reply": generate_explanation(recommendations),
         "recommendations": recommendations,
         "end_of_conversation": False
     }
