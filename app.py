@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException
 from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
@@ -326,6 +326,13 @@ def _has_clear_query_signal(query_lower: str) -> bool:
     return any(term in query_lower for term in signal_terms)
 
 
+def _is_comparison_query(query_lower: str) -> bool:
+    if not query_lower:
+        return False
+    patterns = ["difference between", "difference", "compare", " vs ", " versus ", " versus ", " vs.", "vs ", "compare to", "compare with"]
+    return any(p in query_lower for p in patterns)
+
+
 def _validate_chat_request(request: Any) -> Optional[str]:
     if not request.messages:
         return "messages must contain at least one message."
@@ -470,6 +477,11 @@ def chat(request: ChatRequest = Body(
     if validation_error:
         return ChatResponse(reply=validation_error, recommendations=[], end_of_conversation=False)
 
+    # Enforce user-turn cap immediately (count only user messages). Return HTTP 422 before any retrieval/LLM work.
+    user_turns = sum(1 for msg in request.messages if getattr(msg, "role", "").lower() == "user")
+    if user_turns > 8:
+        raise HTTPException(status_code=422, detail="Too many user turns; max 8 user turns allowed")
+
     try:
         from retriever import search
     except Exception:
@@ -539,6 +551,31 @@ def chat(request: ChatRequest = Body(
     # compute stateless session view from full conversation history
     state_view = _compute_state_from_messages(request.messages)
 
+    # Leadership intent enrichment: if the user mentions senior leadership, CXO, executive, or director-level
+    # ensure leadership-focused products are surfaced (OPQ32r and OPQ Leadership Report).
+    leadership_aliases = [
+        "senior leadership",
+        "cxo",
+        "c-suite",
+        "c suite",
+        "executive",
+        "director-level",
+        "director level",
+        "director",
+        "executive leadership",
+    ]
+    combined_lower = (" ".join(_validate_messages(request.messages))).lower()
+    if any(alias in combined_lower for alias in leadership_aliases):
+        try:
+            leader_a = search("OPQ32r", top_k=2)
+            leader_b = search("OPQ Leadership Report", top_k=2)
+            # merge leader results into the front of shortlist while keeping uniqueness
+            merged = _merge_unique_shortlist(leader_a + leader_b, state_view.get("shortlist", []))
+            state_view["shortlist"] = merged
+        except Exception:
+            # best-effort; if search fails keep original shortlist
+            pass
+
     # Clarification logic
     needs_clarification = False
     clarification_question = ""
@@ -577,8 +614,8 @@ def chat(request: ChatRequest = Body(
         current_shortlist = state_view.get("shortlist", [])
         return ChatResponse(reply="Final shortlist confirmed.", recommendations=_coerce_recommendations(current_shortlist), end_of_conversation=True)
 
-    # Comparison intent
-    if "compare" in query_lower:
+    # Comparison intent: detect common comparison patterns (difference between, compare, vs, versus, etc.)
+    if _is_comparison_query(latest_user_message.lower()):
         try:
             recommendations = search(latest_user_message, top_k=2)
         except Exception:
