@@ -128,9 +128,10 @@ class ChatRequest(BaseModel):
         msgs = values.get("messages")
         if not msgs or len(msgs) == 0:
             raise ValueError("messages must contain at least one message")
-        # Enforce evaluator turn cap: max 8 messages (both user and assistant)
-        if len(msgs) > 8:
-            raise ValueError("messages must contain at most 8 items to comply with evaluator turn cap")
+        # Enforce evaluator turn cap on user turns, not total message objects.
+        user_turns = sum(1 for msg in msgs if getattr(msg, "role", None) == "user" or (isinstance(msg, dict) and msg.get("role") == "user"))
+        if user_turns > 8:
+            raise ValueError("messages must contain at most 8 user turns to comply with evaluator turn cap")
         return values
 
 
@@ -316,7 +317,6 @@ def _has_clear_query_signal(query_lower: str) -> bool:
         "developer",
         "coding",
         "aptitude",
-        "leadership",
         "communication",
         "personality",
         "manager",
@@ -481,13 +481,41 @@ def chat(request: ChatRequest = Body(
 
     latest_user_message = user_messages[-1]
     previous_user_message = user_messages[-2] if len(user_messages) >= 2 else ""
+    initial_query_lower = latest_user_message.lower()
+
+    # refinement intent detection
+    remove_intent = ("remove" in initial_query_lower or "drop" in initial_query_lower)
+    add_intent = ("add" in initial_query_lower or "include" in initial_query_lower)
+    confirm_intent = any(
+        phrase in initial_query_lower
+        for phrase in [
+            "confirmed",
+            "confirm",
+            "final",
+            "lock",
+            "locking it in",
+            "keep verify",
+            "keep it",
+            "that works",
+            "perfect, that's what we need",
+            "that's what we need",
+            "that covers it",
+            "good choice",
+            "we'll use",
+            "we will use",
+            "good two-stage design",
+            "clear.",
+            "done",
+            "all set",
+        ]
+    )
 
     # Merge short refinement queries with previous message, but avoid merging control intents
     control_keywords = {"final", "confirmed", "confirm", "remove", "drop", "add", "include", "compare"}
     latest_tokens = latest_user_message.lower().split()
     contains_control = any(k in latest_user_message.lower() for k in control_keywords)
 
-    if len(latest_tokens) <= 3 and previous_user_message and not contains_control:
+    if len(latest_tokens) <= 3 and previous_user_message and not contains_control and not confirm_intent:
         latest_user_message = f"{previous_user_message} {latest_user_message}"
 
     aggregated_query = " ".join(user_messages)
@@ -511,28 +539,28 @@ def chat(request: ChatRequest = Body(
     # compute stateless session view from full conversation history
     state_view = _compute_state_from_messages(request.messages)
 
-    # refinement intent detection
-    remove_intent = ("remove" in query_lower or "drop" in query_lower)
-    add_intent = ("add" in query_lower or "include" in query_lower)
-    confirm_intent = ("confirmed" in query_lower or "final" in query_lower or "lock" in query_lower)
-
     # Clarification logic
     needs_clarification = False
     clarification_question = ""
     clear_signal = _has_clear_query_signal(aggregated_query)
 
-    if state_view.get("seniority") is None and not clear_signal:
-        needs_clarification = True
-        clarification_question = "What experience level is the role? Graduate, mid-level, or senior?"
-    elif len(state_view.get("skills", [])) == 0 and not clear_signal:
-        needs_clarification = True
-        clarification_question = "What are the primary skills required for the role?"
+    if len(user_messages) <= 2:
+        if state_view.get("seniority") is None and not clear_signal:
+            needs_clarification = True
+            clarification_question = "What experience level is the role? Graduate, mid-level, or senior?"
+        elif len(state_view.get("skills", [])) == 0 and not clear_signal:
+            needs_clarification = True
+            clarification_question = "What are the primary skills required for the role?"
 
     # Handle remove intent (statelessly filter the computed shortlist)
     if remove_intent:
         updated_shortlist = _filter_shortlist_remove(state_view.get("shortlist", []), latest_user_message)
         reply_text = "Requested assessments removed from the shortlist." if updated_shortlist else "No matching assessments were found to remove."
-        return ChatResponse(reply=reply_text, recommendations=_coerce_recommendations(updated_shortlist), end_of_conversation=False)
+        return ChatResponse(
+            reply=reply_text,
+            recommendations=_coerce_recommendations(updated_shortlist),
+            end_of_conversation=confirm_intent,
+        )
 
     # Handle add intent (statelessly merge new search results)
     if add_intent:
