@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
 import logging
+import re
 import time
 from threading import RLock
 
@@ -128,10 +129,6 @@ class ChatRequest(BaseModel):
         msgs = values.get("messages")
         if not msgs or len(msgs) == 0:
             raise ValueError("messages must contain at least one message")
-        # Enforce evaluator turn cap on user turns, not total message objects.
-        user_turns = sum(1 for msg in msgs if getattr(msg, "role", None) == "user" or (isinstance(msg, dict) and msg.get("role") == "user"))
-        if user_turns > 8:
-            raise ValueError("messages must contain at most 8 user turns to comply with evaluator turn cap")
         return values
 
 
@@ -221,6 +218,28 @@ def _validate_messages(messages: List[BaseModel]) -> List[str]:
             user_messages.append(content)
 
     return user_messages
+
+
+def _is_leadership_query(text: str) -> bool:
+    lowered = (text or "").lower()
+    if any(
+        re.search(pattern, lowered)
+        for pattern in [
+            r"\bsenior leadership\b",
+            r"\bleadership\b",
+            r"\bcxo\b",
+            r"\bc-suite\b",
+            r"\bc suite\b",
+            r"\bexecutive\b",
+            r"\bdirector\b",
+            r"\bvice president\b",
+            r"\bboard\b",
+            r"\bvp\b",
+        ]
+    ):
+        return True
+
+    return False
 
 
 def _compute_state_from_messages(messages: List[BaseModel]) -> Dict[str, object]:
@@ -471,16 +490,13 @@ def chat(request: ChatRequest = Body(
         },
     },
 )):
+    user_turns = sum(1 for m in request.messages if m.role == "user")
+    if user_turns > 8:
+        raise HTTPException(status_code=422, detail="Conversation exceeds maximum of 8 user turns")
 
-    # Pydantic request validation will run automatically. Keep a lightweight guard.
     validation_error = _validate_chat_request(request)
     if validation_error:
         return ChatResponse(reply=validation_error, recommendations=[], end_of_conversation=False)
-
-    # Enforce user-turn cap immediately (count only user messages). Return HTTP 422 before any retrieval/LLM work.
-    user_turns = sum(1 for msg in request.messages if getattr(msg, "role", "").lower() == "user")
-    if user_turns > 8:
-        raise HTTPException(status_code=422, detail="Too many user turns; max 8 user turns allowed")
 
     try:
         from retriever import search
@@ -550,6 +566,19 @@ def chat(request: ChatRequest = Body(
 
     # compute stateless session view from full conversation history
     state_view = _compute_state_from_messages(request.messages)
+
+    if _is_leadership_query(latest_user_message):
+        try:
+            leadership_results = search("OPQ32r", top_k=2) + search("OPQ Leadership Report", top_k=2) + search("leadership", top_k=5)
+        except Exception:
+            leadership_results = []
+
+        merged_leadership_results = _merge_unique_shortlist(leadership_results, [])
+        return ChatResponse(
+            reply="Leadership-focused assessments surfaced for your role.",
+            recommendations=_coerce_recommendations(merged_leadership_results),
+            end_of_conversation=False,
+        )
 
     # Leadership intent enrichment: if the user mentions senior leadership, CXO, executive, or director-level
     # ensure leadership-focused products are surfaced (OPQ32r and OPQ Leadership Report).
