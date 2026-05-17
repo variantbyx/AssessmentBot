@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
@@ -11,7 +11,32 @@ from explanation_engine import (
     generate_recommendation_explanations,
 )
 
-app = FastAPI()
+openapi_tags = [
+    {"name": "Health", "description": "Liveness and readiness endpoints."},
+    {
+        "name": "Recommendation API",
+        "description": "Endpoints that return SHL assessment recommendations and related metadata.",
+    },
+    {
+        "name": "Conversational Orchestration",
+        "description": "Stateless conversation orchestration: message-based context reconstruction, refinements (add/remove), comparison flows, and clarification prompts.",
+    },
+]
+
+app = FastAPI(
+    title="SHL Assessment Recommendation API",
+    description=(
+        "Stateless conversational recommender for SHL assessments.\n\n"
+        "This API reconstructs conversational context from the incoming `messages` array, runs hybrid retrieval (BM25 + optional FAISS semantic search), "
+        "and returns grounded, recruiter-friendly assessment recommendations. Supported flows: clarifications, add/remove refinements, comparisons, and final confirmation."
+    ),
+    version="1.0.0",
+    contact={"name": "SHL Platform Team", "email": "platform@shl.com", "url": "https://www.shl.com"},
+    license_info={"name": "Proprietary"},
+    openapi_tags=openapi_tags,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 logger = logging.getLogger("shl.session")
 if not logger.handlers:
@@ -60,20 +85,20 @@ class ChatRequest(BaseModel):
 class Recommendation(BaseModel):
     name: str = Field(..., description="Assessment name", example="Java 8 (New)")
     url: Optional[str] = Field(None, description="Catalog URL for the assessment", example="https://www.shl.com/products/product-catalog/view/java-8-new/")
-    categories: List[str] = Field(default_factory=list, description="Primary categories/tags")
-    job_levels: List[str] = Field(default_factory=list, description="Target job levels")
-    description: str = Field(default="", description="Short description snippet")
-    duration: str = Field(default="", description="Approximate completion time")
-    languages: List[str] = Field(default_factory=list, description="Available languages")
-    assessment_type: str = Field(default="", description="Normalized assessment type")
-    is_adaptive: bool = Field(default=False, description="Whether the assessment is adaptive")
-    simulation_mode: str = Field(default="", description="Simulation/adaptive mode hint")
-    remote_testing: bool = Field(default=False, description="Whether remote testing is supported")
-    recommendation_strength: str = Field(default="", description="Relative recommendation label")
-    confidence_score: int = Field(default=0, description="Confidence score 0-100")
-    matched_skills: List[str] = Field(default_factory=list, description="Skills matched to the query")
-    reasoning_summary: str = Field(default="", description="Short reasoning summary grounding the recommendation")
-    hiring_suitability: str = Field(default="", description="Hiring suitability hint")
+    categories: List[str] = Field(default_factory=list, description="Primary categories/tags", example=["Coding", "Technical"])
+    job_levels: List[str] = Field(default_factory=list, description="Target job levels", example=["Graduate", "Mid", "Senior"])
+    description: str = Field(default="", description="Short description snippet", example="Framework-level evaluation for Spring skills")
+    duration: str = Field(default="", description="Approximate completion time", example="20 minutes")
+    languages: List[str] = Field(default_factory=list, description="Available languages", example=["English"])
+    assessment_type: str = Field(default="", description="Normalized assessment type", example="KnowledgeTest")
+    is_adaptive: bool = Field(default=False, description="Whether the assessment is adaptive", example=False)
+    simulation_mode: str = Field(default="", description="Simulation/adaptive mode hint", example="standard")
+    remote_testing: bool = Field(default=False, description="Whether remote testing is supported", example=True)
+    recommendation_strength: str = Field(default="", description="Relative recommendation label", example="strong")
+    confidence_score: int = Field(default=0, description="Confidence score 0-100", example=82)
+    matched_skills: List[str] = Field(default_factory=list, description="Skills matched to the query", example=["java", "spring", "aws"])
+    reasoning_summary: str = Field(default="", description="Short reasoning summary grounding the recommendation", example="High match for Java and Spring; measures framework knowledge and coding ability.")
+    hiring_suitability: str = Field(default="", description="Hiring suitability hint", example="Good for mid-senior backend roles")
 
     @validator("confidence_score")
     def clamp_confidence(cls, v):
@@ -274,7 +299,13 @@ def home():
 
 #Health Endpoint
 
-@app.get("/health")
+@app.get(
+    "/health",
+    summary="Health check endpoint",
+    description="Liveness and readiness probe for the SHL Recommendation API. Returns status 'ok' when the service is available and models/indexes are loaded.",
+    tags=["Health"],
+    response_model=Dict[str, str],
+)
 def health():
     return {"status": "ok"}
 
@@ -288,8 +319,99 @@ vague_queries = [
 
 #Chat Endpoint
 
-@app.post("/chat", response_model=ChatResponse, summary="Get assistant reply and optional recommendations")
-def chat(request: ChatRequest):
+@app.post(
+    "/chat",
+    response_model=ChatResponse,
+    summary="Conversational SHL assessment recommendation endpoint",
+    description=(
+        "Reconstructs conversational state from the provided `messages` array (stateless).\n\n"
+        "Supported behaviours: clarification prompts when queries are vague, add/remove refinements, comparison flows (compare), and final confirmation. "
+        "Include the full conversation history in `messages` to preserve context; do not rely on server-side sessions."
+    ),
+    tags=["Recommendation API", "Conversational Orchestration"],
+    responses={
+        200: {
+            "description": "Successful ChatResponse",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "success": {
+                            "summary": "Recommendation response",
+                            "value": {
+                                "reply": "Spring (New) is highly suitable for framework-level evaluation. That makes it a strong fit for java, aws, and coding screening.",
+                                "recommendations": [
+                                    {
+                                        "name": "Spring (New)",
+                                        "url": "https://www.shl.com/products/spring-new",
+                                        "categories": ["Coding", "Framework"],
+                                        "job_levels": ["Mid", "Senior"],
+                                        "description": "Evaluates Spring framework knowledge and practical coding skills.",
+                                        "duration": "25 minutes",
+                                        "languages": ["English"],
+                                        "assessment_type": "KnowledgeTest",
+                                        "is_adaptive": False,
+                                        "simulation_mode": "standard",
+                                        "remote_testing": True,
+                                        "recommendation_strength": "strong",
+                                        "confidence_score": 88,
+                                        "matched_skills": ["java", "spring", "aws"],
+                                        "reasoning_summary": "High match for Spring and backend engineering skills.",
+                                        "hiring_suitability": "Good for mid-senior backend roles"
+                                    }
+                                ],
+                                "end_of_conversation": False
+                            },
+                        },
+                        "clarification": {
+                            "summary": "Clarification flow",
+                            "value": {
+                                "reply": "What experience level is the role? Graduate, mid-level, or senior?",
+                                "recommendations": [],
+                                "end_of_conversation": False
+                            }
+                        },
+                        "comparison": {
+                            "summary": "Comparison flow",
+                            "value": {
+                                "reply": "Java 8 is stronger for language fundamentals; Automata focuses on algorithmic reasoning.",
+                                "recommendations": [
+                                    {"name": "Java 8 (New)", "confidence_score": 80},
+                                    {"name": "Automata Problem Solving", "confidence_score": 74}
+                                ],
+                                "end_of_conversation": False
+                            }
+                        },
+                        "validation_error": {
+                            "summary": "Validation error example",
+                            "value": {"reply": "messages must contain at least one message.", "recommendations": [], "end_of_conversation": False}
+                        }
+                    }
+                }
+            }
+        }
+    },
+)
+def chat(request: ChatRequest = Body(
+    ...,
+    examples={
+        "technical_query": {
+            "summary": "Technical Query",
+            "value": {"messages": [{"role": "user", "content": "Senior Java Spring developer"}]},
+        },
+        "clarification_query": {
+            "summary": "Clarification Query",
+            "value": {"messages": [{"role": "user", "content": "Need assessment"}]},
+        },
+        "comparison_query": {
+            "summary": "Comparison Query",
+            "value": {"messages": [{"role": "user", "content": "Compare Java 8 and Automata"}]},
+        },
+        "refinement_query": {
+            "summary": "Refinement Query",
+            "value": {"messages": [{"role": "user", "content": "Add AWS"}]},
+        },
+    },
+)):
 
     # Pydantic request validation will run automatically. Keep a lightweight guard.
     validation_error = _validate_chat_request(request)
@@ -365,7 +487,7 @@ def chat(request: ChatRequest):
         try:
             recommendations = search(latest_user_message, top_k=2)
         except Exception:
-            return {"reply": "Service is temporarily busy. Please retry.", "recommendations": [], "end_of_conversation": False}
+            return ChatResponse(reply="Service is temporarily busy. Please retry.", recommendations=[], end_of_conversation=False)
 
         if len(recommendations) >= 2:
             first, second = recommendations[0], recommendations[1]
