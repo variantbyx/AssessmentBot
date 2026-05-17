@@ -2,6 +2,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List
 
+from explanation_engine import (
+    generate_comparison_explanation,
+    generate_recommendation_explanations,
+)
+
 app = FastAPI()
 
 # making convo history
@@ -45,41 +50,6 @@ vague_queries = [
     "job",
     "candidate"
 ]
-
-#Explanation Generator
-
-def generate_explanation(recommendations):
-
-    explanations = []
-
-    for item in recommendations[:3]:
-
-        name = item["name"]
-
-        categories = item.get("categories", [])
-        job_levels = item.get("job_levels", [])
-
-        explanation = f"{name} is recommended"
-
-        if len(categories) > 0:
-
-            explanation += (
-                f" because it evaluates "
-                f"{', '.join(categories[:2])}"
-            )
-
-        if len(job_levels) > 0:
-
-            explanation += (
-                f" for "
-                f"{', '.join(job_levels[:2])} roles"
-            )
-
-        explanation += "."
-
-        explanations.append(explanation)
-
-    return " ".join(explanations)
 
 #Chat Endpoint
 
@@ -312,16 +282,10 @@ def chat(request: ChatRequest):
             first = recommendations[0]
             second = recommendations[1]
 
-            comparison_text = (
-                f"{first['name']} is mainly suited for "
-                f"{', '.join(first['job_levels'][:2])} roles, while "
-                f"{second['name']} targets "
-                f"{', '.join(second['job_levels'][:2])} roles. "
-                f"The first assessment focuses on "
-                f"{', '.join(first['categories'])}, whereas "
-                f"the second focuses on "
-                f"{', '.join(second['categories'])}."
-                f" Both assessments are suitable for technical hiring workflows."
+            comparison_text = generate_comparison_explanation(
+                latest_user_message,
+                first,
+                second,
             )
 
             # return {
@@ -363,7 +327,11 @@ def chat(request: ChatRequest):
     #Response
 
     return {
-        "reply": generate_explanation(recommendations),
+        "reply": generate_recommendation_explanations(
+            latest_user_message,
+            recommendations,
+            limit=3,
+        ),
         "recommendations": recommendations,
         "end_of_conversation": False
     }

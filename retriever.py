@@ -242,8 +242,12 @@ def search(query, top_k=5):
         results.append({
             "name": item["name"],
             "url": item["link"],
+            "link": item["link"],
             "categories": item["keys"],
-            "job_levels": item["job_levels"]
+            "job_levels": item["job_levels"],
+            "description": item.get("description", ""),
+            "languages": item.get("languages", []),
+            "duration": item.get("duration", "")
         })
 
     return results
