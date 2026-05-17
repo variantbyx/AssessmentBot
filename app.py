@@ -352,6 +352,28 @@ def _is_comparison_query(query_lower: str) -> bool:
     return any(p in query_lower for p in patterns)
 
 
+def _extract_comparison_entities(text: str) -> List[tuple[str, str]]:
+    if not text:
+        return []
+
+    patterns = [
+        r"(?:difference between|compare)\s+(.+?)\s+(?:and|vs\.?|versus)\s+(.+?)(?:\s+(?:for|to|in)\b.*)?$",
+        r"(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:\s+(?:for|to|in)\b.*)?$",
+    ]
+
+    entities: List[tuple[str, str]] = []
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            left_name = match.group(1).strip().rstrip(".,;:")
+            right_name = match.group(2).strip().rstrip(".,;:")
+            if left_name and right_name:
+                entities.append((left_name, right_name))
+                break
+
+    return entities
+
+
 def _validate_chat_request(request: Any) -> Optional[str]:
     if not request.messages:
         return "messages must contain at least one message."
@@ -645,18 +667,7 @@ def chat(request: ChatRequest = Body(
 
     # Comparison intent: detect common comparison patterns (difference between, compare, vs, versus, etc.)
     if _is_comparison_query(latest_user_message.lower()):
-        # try to extract two product/entity names from the user message (e.g., "difference between OPQ32r and Graduate 8.0")
-        import re
-
-        text = latest_user_message
-        pairs = []
-        m = re.search(r"difference between\s+(.+?)\s+and\s+(.+)", text, flags=re.IGNORECASE)
-        if m:
-            pairs.append((m.group(1).strip(), m.group(2).strip()))
-        else:
-            m2 = re.search(r"(.+)\s+vs\.?\s+(.+)", text, flags=re.IGNORECASE)
-            if m2:
-                pairs.append((m2.group(1).strip(), m2.group(2).strip()))
+        pairs = _extract_comparison_entities(latest_user_message)
 
         try:
             # If we parsed explicit product names, search each by name and build a comparison

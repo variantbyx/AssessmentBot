@@ -43,3 +43,22 @@ def test_leadership_query_returns_opq_recommendations_without_clarification():
 
     assert any(name in {"OPQ32r", "OPQ Leadership Report"} for name in names)
     assert body.get("reply") != "What are the primary skills required for the role?"
+
+
+def test_comparison_query_parses_plain_compare_and_entities():
+    response = client.post(
+        "/chat",
+        json={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Compare OPQ32r and Graduate 8.0 for hiring",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body.get("recommendations", [])) >= 2
+    assert body.get("reply") != "What are the primary skills required for the role?"
