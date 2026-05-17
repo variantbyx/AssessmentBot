@@ -79,6 +79,9 @@ class ChatRequest(BaseModel):
         msgs = values.get("messages")
         if not msgs or len(msgs) == 0:
             raise ValueError("messages must contain at least one message")
+        # Enforce evaluator turn cap: max 8 messages (both user and assistant)
+        if len(msgs) > 8:
+            raise ValueError("messages must contain at most 8 items to comply with evaluator turn cap")
         return values
 
 
@@ -440,6 +443,18 @@ def chat(request: ChatRequest = Body(
 
     aggregated_query = " ".join(user_messages)
     query_lower = latest_user_message.lower()
+
+    # Off-scope / refusal detection: refuse legal, salary, interview coaching, or other non-catalog requests
+    refusal_terms = {"legal", "law", "compliance", "salary", "pay", "compensation", "interview tips", "how to cheat", "cheat", "resume"}
+    if any(term in query_lower for term in refusal_terms):
+        return ChatResponse(
+            reply=(
+                "I'm sorry — I can only provide recommendations for SHL assessments and related catalog information. "
+                "I can't assist with legal, compensation, or interview-coaching advice."
+            ),
+            recommendations=[],
+            end_of_conversation=False,
+        )
 
     # compute stateless session view from full conversation history
     state_view = _compute_state_from_messages(request.messages)
