@@ -616,7 +616,31 @@ def chat(request: ChatRequest = Body(
 
     # Comparison intent: detect common comparison patterns (difference between, compare, vs, versus, etc.)
     if _is_comparison_query(latest_user_message.lower()):
+        # try to extract two product/entity names from the user message (e.g., "difference between OPQ32r and Graduate 8.0")
+        import re
+
+        text = latest_user_message
+        pairs = []
+        m = re.search(r"difference between\s+(.+?)\s+and\s+(.+)", text, flags=re.IGNORECASE)
+        if m:
+            pairs.append((m.group(1).strip(), m.group(2).strip()))
+        else:
+            m2 = re.search(r"(.+)\s+vs\.?\s+(.+)", text, flags=re.IGNORECASE)
+            if m2:
+                pairs.append((m2.group(1).strip(), m2.group(2).strip()))
+
         try:
+            # If we parsed explicit product names, search each by name and build a comparison
+            if pairs:
+                left_name, right_name = pairs[0]
+                left_results = search(left_name, top_k=1)
+                right_results = search(right_name, top_k=1)
+                if left_results and right_results:
+                    left, right = left_results[0], right_results[0]
+                    comparison_text = generate_comparison_explanation(latest_user_message, left, right)
+                    return ChatResponse(reply=comparison_text, recommendations=_coerce_recommendations([left, right]), end_of_conversation=False)
+
+            # Fallback: use standard search and compare top 2
             recommendations = search(latest_user_message, top_k=2)
         except Exception:
             return ChatResponse(reply="Service is temporarily busy. Please retry.", recommendations=[], end_of_conversation=False)

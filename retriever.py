@@ -117,7 +117,7 @@ def _extract_query_signals(query: str) -> List[str]:
         ("python", ["python", "django", "flask", "pandas"]),
         ("coding", ["coding", "programming", "developer", "software engineer", "live coding", "automata"]),
         ("aptitude", ["aptitude", "reasoning", "cognitive", "numerical", "logical"]),
-        ("leadership", ["leadership", "people management", "manager", "team lead"]),
+        ("leadership", ["leadership", "people management", "manager", "team lead", "senior leadership", "cxo", "cxos", "c-suite", "c suite", "executive", "director-level", "director level", "director"]),
         ("communication", ["communication", "verbal", "interpersonal", "business communication"]),
         ("aws", ["aws", "cloud", "ec2", "lambda"]),
         ("sql", ["sql", "database", "data modeling"]),
@@ -480,8 +480,12 @@ def search(query, top_k=5):
         if "graduate" in query_lower and "Graduate" in item["job_levels"]:
             metadata_boost += 0.05
 
-        if "leadership" in query_lower and "Personality & Behavior" in item["keys"]:
-            metadata_boost += 0.05
+        # Stronger boost for leadership intents; also boost OPQ / leadership-named products
+        if any(k in query_lower for k in ["leadership", "senior leadership", "cxo", "executive", "director"]):
+            if "Personality & Behavior" in item["keys"] or "Leadership" in item.get("name", "") or "OPQ" in item.get("name", "") or "leadership" in item.get("name", "").lower():
+                metadata_boost += 0.18
+            else:
+                metadata_boost += 0.04
 
         if "aptitude" in query_lower and "Ability & Aptitude" in item["keys"]:
             metadata_boost += 0.05
@@ -522,6 +526,34 @@ def search(query, top_k=5):
             recommendation_strength=recommendation_strength,
             confidence_score=confidence_score,
         ))
+
+    # If leadership-like query, ensure OPQ / leadership-named items are prioritized
+    if any(k in query.lower() for k in ["leadership", "senior leadership", "cxo", "executive", "director"]):
+        opq_items = []
+        for item in data:
+            name = item.get("name", "") or ""
+            if "opq" in name.lower() or "leadership" in name.lower():
+                # build payload for candidate
+                payload = _build_recommendation_payload(
+                    query=query,
+                    item=item,
+                    semantic=0.0,
+                    keyword=0.0,
+                    metadata_boost=0.2,
+                    final_score=0.0,
+                    recommendation_strength="High",
+                    confidence_score=85,
+                )
+                opq_items.append(payload)
+
+        # Prepend unique OPQ items preserving order
+        if opq_items:
+            existing_names = {r["name"] for r in results}
+            new_list = []
+            for opq in opq_items:
+                if opq["name"] not in existing_names:
+                    new_list.append(opq)
+            results = new_list + results
 
     return results
 
