@@ -528,11 +528,15 @@ def search(query, top_k=5):
         ))
 
     # If leadership-like query, ensure OPQ / leadership-named items are prioritized
-    if any(k in query.lower() for k in ["leadership", "senior leadership", "cxo", "executive", "director"]):
+    leadership_terms = ["leadership", "senior leadership", "cxo", "executive", "director", "vice president", "vp"]
+    if any(k in query.lower() for k in leadership_terms):
         opq_items = []
         for item in data:
             name = item.get("name", "") or ""
-            if "opq" in name.lower() or "leadership" in name.lower():
+            # deterministic mapping: also consider explicit canonical names
+            canonical_leadership_names = {"opq32r", "opq leadership report", "occupational personality questionnaire opq32r"}
+            name_lower = name.lower()
+            if ("opq" in name_lower or "leadership" in name_lower) or any(c in name_lower for c in canonical_leadership_names):
                 # build payload for candidate
                 payload = _build_recommendation_payload(
                     query=query,
