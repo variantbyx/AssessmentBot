@@ -1,56 +1,47 @@
-from copy import deepcopy
-
-from app import ChatRequest, Message, chat, conversation_store
+from app import ChatRequest, Message, chat
 
 
-def make_request(session_id, user_text):
-    return ChatRequest(
-        session_id=session_id,
-        messages=[Message(role="user", content=user_text)],
-    )
+def run_stateless_smoke():
+    sessions = {
+        "session-a": [],
+        "session-b": [],
+    }
 
+    def send(session_id, user_text):
+        sessions[session_id].append(Message(role="user", content=user_text))
+        req = ChatRequest(messages=sessions[session_id])
+        resp = chat(req)
+        # support ChatResponse instances (Pydantic) or raw dicts
+        if hasattr(resp, "dict"):
+            resp = resp.dict()
+        print(f"SESSION={session_id}\nTEXT={user_text}\nREPLY={resp['reply'][:200]}\nRECS={len(resp.get('recommendations') or [])}\n")
+        return resp
 
-def latest_state(session_id):
-    return deepcopy(conversation_store.get(session_id, {}))
+    # Initial queries
+    resp_a1 = send("session-a", "Senior Java backend developer with Spring and AWS")
+    assert resp_a1.get("recommendations"), "Session A shortlist should be populated"
 
+    resp_b1 = send("session-b", "Graduate software engineer aptitude assessment")
+    assert resp_b1.get("recommendations"), "Session B shortlist should be populated"
+    assert resp_a1["recommendations"] != resp_b1["recommendations"], "Session A and B shortlists should differ"
 
-def run_case(session_id, text):
-    response = chat(make_request(session_id, text))
-    print(f"SESSION={session_id}\nTEXT={text}\nREPLY={response['reply']}\nRECS={len(response.get('recommendations') or [])}\n")
-    return response
+    # Refinement for A (stateless: include previous messages in the request)
+    resp_a2 = send("session-a", "add more similar assessments")
+    assert resp_a2.get("recommendations"), "Refined shortlist must be present"
+    assert resp_a2["recommendations"] != resp_b1["recommendations"], "Session B must not change when Session A is refined"
 
+    # Removal for A
+    resp_a3 = send("session-a", "remove java")
+    assert len(resp_a3.get("recommendations")) <= len(resp_a2.get("recommendations")), "Removal should not increase shortlist size"
 
-def assert_isolated():
-    conversation_store.clear()
+    # Confirm both
+    resp_a_confirm = send("session-a", "final shortlist confirmed")
+    resp_b_confirm = send("session-b", "final shortlist confirmed")
+    assert resp_a_confirm["end_of_conversation"] is True
+    assert resp_b_confirm["end_of_conversation"] is True
 
-    session_a = "session-a"
-    session_b = "session-b"
-
-    run_case(session_a, "Senior Java backend developer with Spring and AWS")
-    state_a_1 = latest_state(session_a)
-    assert state_a_1["shortlist"], "Session A shortlist should be populated"
-
-    run_case(session_b, "Graduate software engineer aptitude assessment")
-    state_b_1 = latest_state(session_b)
-    assert state_b_1["shortlist"], "Session B shortlist should be populated"
-    assert state_a_1["shortlist"] != state_b_1["shortlist"], "Session A and B shortlists should differ"
-
-    run_case(session_a, "add more similar assessments")
-    state_a_2 = latest_state(session_a)
-    state_b_2 = latest_state(session_b)
-    assert state_a_2["shortlist"] != state_b_2["shortlist"], "Session B must not change when Session A is refined"
-
-    run_case(session_a, "remove java")
-    state_a_3 = latest_state(session_a)
-    assert len(state_a_3["shortlist"]) <= len(state_a_2["shortlist"]), "Removal should not increase shortlist size"
-
-    confirm_a = run_case(session_a, "final shortlist confirmed")
-    confirm_b = run_case(session_b, "final shortlist confirmed")
-    assert confirm_a["end_of_conversation"] is True
-    assert confirm_b["end_of_conversation"] is True
-
-    print("Session isolation smoke test passed.")
+    print("Stateless session smoke test passed.")
 
 
 if __name__ == "__main__":
-    assert_isolated()
+    run_stateless_smoke()

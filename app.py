@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, HttpUrl, root_validator, validator
 from typing import Any, Dict, List, Optional
 from copy import deepcopy
 import logging
@@ -20,7 +20,7 @@ if not logger.handlers:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
 
-SESSION_TTL_SECONDS = 60 * 60 * 6
+
 SESSION_STATE_TEMPLATE = {
     "role_type": None,
     "seniority": None,
@@ -29,62 +29,107 @@ SESSION_STATE_TEMPLATE = {
     "skills": [],
     "shortlist": [],
     "excluded": [],
-    "created_at": 0.0,
-    "updated_at": 0.0,
 }
-
-conversation_lock = RLock()
-
-
-def _new_session_state() -> Dict[str, object]:
-    now = time.time()
-    state = deepcopy(SESSION_STATE_TEMPLATE)
-    state["created_at"] = now
-    state["updated_at"] = now
-    return state
-
-
-def _cleanup_stale_sessions() -> None:
-    now = time.time()
-    stale_sessions = []
-
-    for session_id, state in conversation_store.items():
-        updated_at = float(state.get("updated_at", 0.0) or 0.0)
-        if updated_at and now - updated_at > SESSION_TTL_SECONDS:
-            stale_sessions.append(session_id)
-
-    for session_id in stale_sessions:
-        conversation_store.pop(session_id, None)
-        logger.info("pruned stale session session_id=%s", session_id)
-
-
-def _get_or_create_session_state(session_id: str) -> Dict[str, object]:
-    with conversation_lock:
-        _cleanup_stale_sessions()
-
-        if session_id not in conversation_store:
-            conversation_store[session_id] = _new_session_state()
-            logger.info("created session session_id=%s", session_id)
-        else:
-            logger.info("loaded session session_id=%s", session_id)
-
-        conversation_store[session_id]["updated_at"] = time.time()
-        return conversation_store[session_id]
-
-
-def _snapshot_session_state(session_id: str) -> Dict[str, object]:
-    with conversation_lock:
-        return deepcopy(conversation_store[session_id])
-
-
-def _commit_session_state(session_id: str, state: Dict[str, object]) -> None:
-    with conversation_lock:
-        state["updated_at"] = time.time()
-        conversation_store[session_id] = deepcopy(state)
-
 
 def _normalize_message_text(value: Optional[str]) -> str:
     return (value or "").strip()
+
+
+# -------------------------
+# Pydantic request/response
+# -------------------------
+from typing import Literal
+
+
+class Message(BaseModel):
+    role: Literal["user", "assistant", "system"] = Field(..., description="Role of the message author", example="user")
+    content: str = Field(..., min_length=1, description="Message content", example="Hiring a mid-level Java developer with AWS experience")
+
+
+class ChatRequest(BaseModel):
+    messages: List[Message] = Field(..., min_items=1, description="Conversation messages in chronological order")
+
+    @root_validator(pre=True)
+    def check_messages_present(cls, values):
+        msgs = values.get("messages")
+        if not msgs or len(msgs) == 0:
+            raise ValueError("messages must contain at least one message")
+        return values
+
+
+class Recommendation(BaseModel):
+    name: str = Field(..., description="Assessment name", example="Java 8 (New)")
+    url: Optional[str] = Field(None, description="Catalog URL for the assessment", example="https://www.shl.com/products/product-catalog/view/java-8-new/")
+    categories: List[str] = Field(default_factory=list, description="Primary categories/tags")
+    job_levels: List[str] = Field(default_factory=list, description="Target job levels")
+    description: str = Field(default="", description="Short description snippet")
+    duration: str = Field(default="", description="Approximate completion time")
+    languages: List[str] = Field(default_factory=list, description="Available languages")
+    assessment_type: str = Field(default="", description="Normalized assessment type")
+    is_adaptive: bool = Field(default=False, description="Whether the assessment is adaptive")
+    simulation_mode: str = Field(default="", description="Simulation/adaptive mode hint")
+    remote_testing: bool = Field(default=False, description="Whether remote testing is supported")
+    recommendation_strength: str = Field(default="", description="Relative recommendation label")
+    confidence_score: int = Field(default=0, description="Confidence score 0-100")
+    matched_skills: List[str] = Field(default_factory=list, description="Skills matched to the query")
+    reasoning_summary: str = Field(default="", description="Short reasoning summary grounding the recommendation")
+    hiring_suitability: str = Field(default="", description="Hiring suitability hint")
+
+    @validator("confidence_score")
+    def clamp_confidence(cls, v):
+        if v is None:
+            return 0
+        if v < 0:
+            return 0
+        if v > 100:
+            return 100
+        return int(v)
+
+    @validator("url", pre=True, always=True)
+    def ensure_url_or_none(cls, v):
+        if not v:
+            return None
+        if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://")):
+            return v
+        # if invalid, return None to avoid validation errors for unknown hosts
+        return None
+
+
+class ChatResponse(BaseModel):
+    reply: str = Field(..., description="Assistant reply text")
+    recommendations: List[Recommendation] = Field(default_factory=list, description="List of recommendation objects; empty when clarifying")
+    end_of_conversation: bool = Field(False, description="Whether the conversation is complete")
+
+
+# Helper to coerce raw recommendation dicts into Recommendation models
+def _coerce_recommendations(raw_list: List[Dict[str, object]]) -> List[Recommendation]:
+    coerced: List[Recommendation] = []
+    for raw in (raw_list or []):
+        try:
+            # map retriever keys to model fields defensively
+            mapped = {
+                "name": raw.get("name", ""),
+                "url": raw.get("url") or raw.get("link") or None,
+                "categories": raw.get("categories") or raw.get("keys") or [],
+                "job_levels": raw.get("job_levels") or [],
+                "description": raw.get("description", ""),
+                "duration": raw.get("duration", ""),
+                "languages": raw.get("languages", []),
+                "assessment_type": raw.get("assessment_type", ""),
+                "is_adaptive": bool(raw.get("is_adaptive", False)),
+                "simulation_mode": raw.get("simulation_mode", raw.get("simulation_mode", "")) or raw.get("simulation_mode", ""),
+                "remote_testing": bool(raw.get("remote_testing", False)),
+                "recommendation_strength": raw.get("recommendation_strength", ""),
+                "confidence_score": raw.get("confidence_score", 0),
+                "matched_skills": raw.get("matched_skills", []),
+                "reasoning_summary": raw.get("reasoning_summary", ""),
+                "hiring_suitability": raw.get("hiring_suitability", ""),
+            }
+            coerced.append(Recommendation.parse_obj(mapped))
+        except Exception:
+            # ignore malformed items but keep API stable
+            continue
+    return coerced
 
 
 def _validate_messages(messages: List[BaseModel]) -> List[str]:
@@ -100,6 +145,31 @@ def _validate_messages(messages: List[BaseModel]) -> List[str]:
     return user_messages
 
 
+def _compute_state_from_messages(messages: List[BaseModel]) -> Dict[str, object]:
+    # Build a stateless session-like view by replaying user messages
+    state = deepcopy(SESSION_STATE_TEMPLATE)
+    user_texts = []
+
+    for msg in messages:
+        role = _normalize_message_text(getattr(msg, "role", ""))
+        content = _normalize_message_text(getattr(msg, "content", ""))
+        if role == "user" and content:
+            user_texts.append(content)
+
+    combined = " ".join(user_texts).strip().lower()
+    _touch_session_fields(state, combined)
+
+    # derive an initial shortlist from the combined context (stateless)
+    try:
+        from retriever import search
+        base_results = search(combined or user_texts[-1] if user_texts else "", top_k=5)
+        state["shortlist"] = deepcopy(base_results)
+    except Exception:
+        state["shortlist"] = []
+
+    return state
+
+
 def _build_session_state_response(state: Dict[str, object]) -> Dict[str, object]:
     return {
         "role_type": state.get("role_type"),
@@ -109,74 +179,30 @@ def _build_session_state_response(state: Dict[str, object]) -> Dict[str, object]
         "skills": list(state.get("skills", [])),
         "shortlist": deepcopy(state.get("shortlist", [])),
         "excluded": list(state.get("excluded", [])),
-        "created_at": state.get("created_at"),
-        "updated_at": state.get("updated_at"),
+        
     }
 
 
-def _update_shortlist(session_id: str, recommendations: List[Dict[str, object]]) -> None:
-    with conversation_lock:
-        state = conversation_store.setdefault(session_id, _new_session_state())
-        state["shortlist"] = deepcopy(recommendations)
-        state["updated_at"] = time.time()
-        logger.info(
-            "updated shortlist session_id=%s size=%s",
-            session_id,
-            len(recommendations),
-        )
+def _merge_unique_shortlist(base: List[Dict[str, object]], additions: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    existing_names = {item.get("name") for item in base}
+    merged = deepcopy(base)
+    for item in additions:
+        name = item.get("name")
+        if name not in existing_names:
+            merged.append(deepcopy(item))
+            existing_names.add(name)
+    return merged
 
 
-def _append_unique_shortlist(session_id: str, recommendations: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    with conversation_lock:
-        state = conversation_store.setdefault(session_id, _new_session_state())
-        existing_names = {item.get("name") for item in state.get("shortlist", [])}
-        added = 0
-
-        for item in recommendations:
-            name = item.get("name")
-            if name not in existing_names:
-                state["shortlist"].append(deepcopy(item))
-                existing_names.add(name)
-                added += 1
-
-        state["updated_at"] = time.time()
-        logger.info(
-            "added shortlist items session_id=%s added=%s total=%s",
-            session_id,
-            added,
-            len(state["shortlist"]),
-        )
-        return deepcopy(state["shortlist"])
-
-
-def _remove_from_shortlist(session_id: str, query_text: str) -> List[Dict[str, object]]:
+def _filter_shortlist_remove(shortlist: List[Dict[str, object]], query_text: str) -> List[Dict[str, object]]:
     query_words = {word for word in query_text.lower().split() if word}
-
-    with conversation_lock:
-        state = conversation_store.setdefault(session_id, _new_session_state())
-        before = len(state["shortlist"])
-        updated_shortlist = []
-
-        for item in state["shortlist"]:
-            item_name = str(item.get("name", "")).lower()
-            should_remove = any(word in item_name for word in query_words)
-
-            if should_remove:
-                state["excluded"].append(item.get("name"))
-            else:
-                updated_shortlist.append(item)
-
-        state["shortlist"] = updated_shortlist
-        state["updated_at"] = time.time()
-
-        logger.info(
-            "removed shortlist items session_id=%s removed=%s remaining=%s",
-            session_id,
-            before - len(updated_shortlist),
-            len(updated_shortlist),
-        )
-
-        return deepcopy(state["shortlist"])
+    updated = []
+    for item in shortlist:
+        item_name = str(item.get("name", "")).lower()
+        should_remove = any(word in item_name for word in query_words)
+        if not should_remove:
+            updated.append(item)
+    return deepcopy(updated)
 
 
 def _touch_session_fields(state: Dict[str, object], query_lower: str) -> None:
@@ -224,9 +250,6 @@ def _has_clear_query_signal(query_lower: str) -> bool:
 
 
 def _validate_chat_request(request: Any) -> Optional[str]:
-    if not request.session_id or not request.session_id.strip():
-        return "session_id is required and cannot be empty."
-
     if not request.messages:
         return "messages must contain at least one message."
 
@@ -238,23 +261,8 @@ def _validate_chat_request(request: Any) -> Optional[str]:
 
     return None
 
-conversation_store = {}
 
-#Message Schema
-
-class Message(BaseModel):
-    role: str
-    content: str
-
-#Request Schema
-
-# class ChatRequest(BaseModel):
-#     messages: List[Message]
-
-#user conversation has memory.
-class ChatRequest(BaseModel):
-    session_id: str
-    messages: List[Message]
+# (Pydantic Message and ChatRequest defined above)
 
 #homepage
 
@@ -280,225 +288,99 @@ vague_queries = [
 
 #Chat Endpoint
 
-@app.post("/chat")
+@app.post("/chat", response_model=ChatResponse, summary="Get assistant reply and optional recommendations")
 def chat(request: ChatRequest):
 
+    # Pydantic request validation will run automatically. Keep a lightweight guard.
     validation_error = _validate_chat_request(request)
     if validation_error:
-        return {
-            "reply": validation_error,
-            "recommendations": [],
-            "end_of_conversation": False,
-        }
-
-    session_id = request.session_id
-
-    state = _get_or_create_session_state(session_id)
-    state_view = _snapshot_session_state(session_id)
+        return ChatResponse(reply=validation_error, recommendations=[], end_of_conversation=False)
 
     try:
         from retriever import search
     except Exception:
-        return {
-            "reply": "Service is warming up. Please try again in a moment.",
-            "recommendations": [],
-            "end_of_conversation": False
-        }
-
-    latest_user_message = ""
-    previous_user_message = ""
-
-    #Get latest and previous user messages
+        return ChatResponse(reply="Service is warming up. Please try again in a moment.", recommendations=[], end_of_conversation=False)
 
     user_messages = _validate_messages(request.messages)
+    if not user_messages:
+        return ChatResponse(reply="No user message found.", recommendations=[], end_of_conversation=False)
 
-    if len(user_messages) >= 1:
-        latest_user_message = user_messages[-1]
+    latest_user_message = user_messages[-1]
+    previous_user_message = user_messages[-2] if len(user_messages) >= 2 else ""
 
-    if len(user_messages) >= 2:
-        previous_user_message = user_messages[-2]
+    # Merge short refinement queries with previous message, but avoid merging control intents
+    control_keywords = {"final", "confirmed", "confirm", "remove", "drop", "add", "include", "compare"}
+    latest_tokens = latest_user_message.lower().split()
+    contains_control = any(k in latest_user_message.lower() for k in control_keywords)
 
-    #Merge refinement queries
+    if len(latest_tokens) <= 3 and previous_user_message and not contains_control:
+        latest_user_message = f"{previous_user_message} {latest_user_message}"
 
-    if (
-        len(latest_user_message.split()) <= 3
-        and previous_user_message != ""
-    ):
-        latest_user_message = (
-            previous_user_message + " " + latest_user_message
-        )
-
+    aggregated_query = " ".join(user_messages)
     query_lower = latest_user_message.lower()
 
-    _touch_session_fields(state_view, query_lower)
+    # compute stateless session view from full conversation history
+    state_view = _compute_state_from_messages(request.messages)
 
-    #refinement intent detection
+    # refinement intent detection
+    remove_intent = ("remove" in query_lower or "drop" in query_lower)
+    add_intent = ("add" in query_lower or "include" in query_lower)
+    confirm_intent = ("confirmed" in query_lower or "final" in query_lower or "lock" in query_lower)
 
-    remove_intent = (
-        "remove" in query_lower or
-        "drop" in query_lower
-    )
-
-    add_intent = (
-        "add" in query_lower or
-        "include" in query_lower
-    )
-
-    confirm_intent = (
-        "confirmed" in query_lower or
-        "final" in query_lower or
-        "lock" in query_lower
-    )
-
-    # ---------- Detect Seniority ----------
-
-    _commit_session_state(session_id, state_view)
-
-    # is_vague = (
-    #     len(query_lower.split()) <= 3
-    # )
-
-    #ASK INTELLIGENT FOLLOWUPS
-
+    # Clarification logic
     needs_clarification = False
     clarification_question = ""
+    clear_signal = _has_clear_query_signal(aggregated_query)
 
-    clear_signal = _has_clear_query_signal(query_lower)
-
-    if state_view["seniority"] is None and not clear_signal:
-
+    if state_view.get("seniority") is None and not clear_signal:
         needs_clarification = True
-        clarification_question = (
-            "What experience level is the role? "
-            "Graduate, mid-level, or senior?"
-        )
-
-    elif len(state_view["skills"]) == 0 and not clear_signal:
-
+        clarification_question = "What experience level is the role? Graduate, mid-level, or senior?"
+    elif len(state_view.get("skills", [])) == 0 and not clear_signal:
         needs_clarification = True
-        clarification_question = (
-            "What are the primary skills required for the role?"
-        )
+        clarification_question = "What are the primary skills required for the role?"
 
-    #Handle REMOVE intent
-
-    # ---------- Remove Intent ----------
-
+    # Handle remove intent (statelessly filter the computed shortlist)
     if remove_intent:
-        updated_shortlist = _remove_from_shortlist(session_id, query_lower)
+        updated_shortlist = _filter_shortlist_remove(state_view.get("shortlist", []), latest_user_message)
+        reply_text = "Requested assessments removed from the shortlist." if updated_shortlist else "No matching assessments were found to remove."
+        return ChatResponse(reply=reply_text, recommendations=_coerce_recommendations(updated_shortlist), end_of_conversation=False)
 
-        return {
-            "reply": "Requested assessments removed from the shortlist." if updated_shortlist else "No matching assessments were found to remove.",
-            "recommendations": updated_shortlist,
-            "end_of_conversation": False
-        }
-
-    # ---------- Add Intent ----------
-
+    # Handle add intent (statelessly merge new search results)
     if add_intent:
+        try:
+            new_results = search(latest_user_message, top_k=3)
+        except Exception:
+            return ChatResponse(reply="Service is temporarily busy. Please retry.", recommendations=[], end_of_conversation=False)
 
-        new_results = search(
-            latest_user_message,
-            top_k=3
-        )
+        updated_shortlist = _merge_unique_shortlist(state_view.get("shortlist", []), new_results)
+        return ChatResponse(reply="New assessments added to the shortlist.", recommendations=_coerce_recommendations(updated_shortlist), end_of_conversation=False)
 
-        updated_shortlist = _append_unique_shortlist(session_id, new_results)
-
-        return {
-            "reply": "New assessments added to the shortlist.",
-            "recommendations": updated_shortlist,
-            "end_of_conversation": False
-        }
-
-    #Handle CONFIRM intent
-
-    # ---------- Confirm Intent ----------
-
+    # Handle confirm intent
     if confirm_intent:
+        current_shortlist = state_view.get("shortlist", [])
+        return ChatResponse(reply="Final shortlist confirmed.", recommendations=_coerce_recommendations(current_shortlist), end_of_conversation=True)
 
-        current_shortlist = _snapshot_session_state(session_id)["shortlist"]
-        logger.info(
-            "confirmed shortlist session_id=%s size=%s",
-            session_id,
-            len(current_shortlist),
-        )
-
-        return {
-            "reply": "Final shortlist confirmed.",
-            "recommendations": current_shortlist,
-            "end_of_conversation": True
-        }
-
-    #Run retrieval
-
-    #Comparison Intent
-
+    # Comparison intent
     if "compare" in query_lower:
-
-        recommendations = search(
-            latest_user_message,
-            top_k=2
-        )
-
-        #Add shortlist persistence after retrieval
-
-        _update_shortlist(session_id, recommendations)
+        try:
+            recommendations = search(latest_user_message, top_k=2)
+        except Exception:
+            return {"reply": "Service is temporarily busy. Please retry.", "recommendations": [], "end_of_conversation": False}
 
         if len(recommendations) >= 2:
-
-            first = recommendations[0]
-            second = recommendations[1]
-
-            comparison_text = generate_comparison_explanation(
-                latest_user_message,
-                first,
-                second,
-            )
-
-            # return {
-            #     "reply": comparison_text,
-            #     "recommendations": recommendations,
-            #     "end_of_conversation": False
-            # }
-
-            return {
-                "reply": comparison_text,
-                "recommendations": recommendations,
-                "end_of_conversation": False
-            }
+            first, second = recommendations[0], recommendations[1]
+            comparison_text = generate_comparison_explanation(latest_user_message, first, second)
+            return ChatResponse(reply=comparison_text, recommendations=_coerce_recommendations(recommendations), end_of_conversation=False)
 
     if needs_clarification:
+        return ChatResponse(reply=clarification_question, recommendations=[], end_of_conversation=False)
 
-        return {
-            "reply": clarification_question,
-            "recommendations": None,
-            "end_of_conversation": False
-        }
-
+    # Default: run retrieval using aggregated context
     try:
-        recommendations = search(
-            latest_user_message,
-            top_k=5
-        )
-
-        _update_shortlist(session_id, recommendations)
-
+        recommendations = search(aggregated_query or latest_user_message, top_k=5)
     except Exception:
+        return ChatResponse(reply="Service is temporarily busy. Please retry your request.", recommendations=[], end_of_conversation=False)
 
-        return {
-            "reply": "Service is temporarily busy. Please retry your request.",
-            "recommendations": [],
-            "end_of_conversation": False
-        }
+    reply_text = generate_recommendation_explanations(latest_user_message, recommendations, limit=3)
 
-    #Response
-
-    return {
-        "reply": generate_recommendation_explanations(
-            latest_user_message,
-            recommendations,
-            limit=3,
-        ),
-        "recommendations": deepcopy(recommendations),
-        "end_of_conversation": False
-    }
+    return ChatResponse(reply=reply_text, recommendations=_coerce_recommendations(deepcopy(recommendations)), end_of_conversation=False)
