@@ -38,6 +38,55 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+
+# Ensure OpenAPI includes explicit examples for request bodies and responses
+from fastapi.openapi.utils import get_openapi
+
+
+def _generate_custom_openapi():
+    if getattr(app.state, "_custom_openapi", None):
+        return app.state._custom_openapi
+
+    spec = get_openapi(title=app.title, version=app.version, routes=app.routes, description=app.description, tags=openapi_tags)
+
+    # Inject examples for /chat requestBody if missing
+    try:
+        chat_path = spec.get('paths', {}).get('/chat', {}).get('post', {})
+        req_body = chat_path.get('requestBody', {})
+        content = req_body.get('content', {}).get('application/json', {})
+        if content is not None and not content.get('examples'):
+            content['examples'] = {
+                'technical_query': {'summary': 'Technical Query', 'value': {'messages': [{'role': 'user', 'content': 'Senior Java Spring developer'}]}},
+                'clarification_query': {'summary': 'Clarification Query', 'value': {'messages': [{'role': 'user', 'content': 'Need assessment'}]}},
+                'comparison_query': {'summary': 'Comparison Query', 'value': {'messages': [{'role': 'user', 'content': 'Compare Java 8 and Automata'}]}},
+                'refinement_query': {'summary': 'Refinement Query', 'value': {'messages': [{'role': 'user', 'content': 'Add AWS'}]}}
+            }
+
+        # Ensure responses 200 example exists for /chat
+        responses = chat_path.get('responses', {})
+        ok = responses.get('200', {})
+        if ok:
+            ok_content = ok.get('content', {}).get('application/json', {})
+            if ok_content is not None and not ok_content.get('examples'):
+                ok_content['examples'] = {
+                    'success': {
+                        'summary': 'Recommendation response',
+                        'value': {
+                            'reply': 'Spring (New) is highly suitable for framework-level evaluation.',
+                            'recommendations': [],
+                            'end_of_conversation': False,
+                        },
+                    }
+                }
+    except Exception:
+        pass
+
+    app.state._custom_openapi = spec
+    return spec
+
+
+app.openapi = _generate_custom_openapi
+
 logger = logging.getLogger("shl.session")
 if not logger.handlers:
     logging.basicConfig(
@@ -444,13 +493,16 @@ def chat(request: ChatRequest = Body(
     aggregated_query = " ".join(user_messages)
     query_lower = latest_user_message.lower()
 
-    # Off-scope / refusal detection: refuse legal, salary, interview coaching, or other non-catalog requests
-    refusal_terms = {"legal", "law", "compliance", "salary", "pay", "compensation", "interview tips", "how to cheat", "cheat", "resume"}
-    if any(term in query_lower for term in refusal_terms):
+    # Off-scope / refusal detection: refuse legal, salary, interview coaching, or other non-catalog requests.
+    # Also perform simple prompt-injection detection (e.g., requests to ignore prior instructions or to run arbitrary code).
+    refusal_terms = {"legal", "law", "compliance", "salary", "pay", "compensation", "interview tips", "how to cheat", "cheat", "resume", "hire advice"}
+    injection_signals = ["ignore previous", "ignore instructions", "follow only", "system:", "assistant:", "do not follow", "run this", "execute", "curl http", "http://", "https://"]
+
+    if any(term in query_lower for term in refusal_terms) or any(sig in query_lower for sig in injection_signals):
         return ChatResponse(
             reply=(
                 "I'm sorry — I can only provide recommendations for SHL assessments and related catalog information. "
-                "I can't assist with legal, compensation, or interview-coaching advice."
+                "I can't assist with legal, compensation, or interview-coaching advice, and I won't follow instructions that appear to override system behavior or execute external code."
             ),
             recommendations=[],
             end_of_conversation=False,
